@@ -1,6 +1,7 @@
 use lambda_http::{Body, Error, Request, RequestExt, Response};
 use std::env;
 use http::header::HeaderValue;
+use http::StatusCode;
 
 /// This is the main body for the function.
 /// Write your code inside it.
@@ -15,9 +16,8 @@ pub(crate) async fn function_handler(event: Request) -> Result<Response<Body>, E
 
     if client_key != Some(&expected_key_value) {
         return Ok(Response::builder()
-            .status(403)
-            .body("Forbidden: Invalid API Key".into())
-            .unwrap());
+            .status(StatusCode::FORBIDDEN)
+            .body("Forbidden: Invalid API Key".into())?);
     }
 
     // Extract some useful information from the request
@@ -48,7 +48,7 @@ mod tests {
         let request = Request::default();
 
         let response = function_handler(request).await.unwrap();
-        assert_eq!(response.status(), 200);
+        assert_eq!(response.status(), StatusCode::OK);
 
         let body_bytes = response.body().to_vec();
         let body_string = String::from_utf8(body_bytes).unwrap();
@@ -68,7 +68,7 @@ mod tests {
             .with_query_string_parameters(query_string_parameters);
 
         let response = function_handler(request).await.unwrap();
-        assert_eq!(response.status(), 200);
+        assert_eq!(response.status(), StatusCode::OK);
 
         let body_bytes = response.body().to_vec();
         let body_string = String::from_utf8(body_bytes).unwrap();
