@@ -1,10 +1,25 @@
 use lambda_http::{Body, Error, Request, RequestExt, Response};
+use std::env;
+use http::header::HeaderValue;
 
 /// This is the main body for the function.
 /// Write your code inside it.
 /// There are some code example in the following URLs:
 /// - https://github.com/awslabs/aws-lambda-rust-runtime/tree/main/examples
 pub(crate) async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
+    let expected_key = env::var("API_KEY").expect("API_KEY not set");
+    let expected_key_value = HeaderValue::from_str(&expected_key)
+        .map_err(|_| Error::from("Invalid API_KEY environment variable"))?;
+
+    let client_key = event.headers().get("x-api-key");
+
+    if client_key != Some(&expected_key_value) {
+        return Ok(Response::builder()
+            .status(403)
+            .body("Forbidden: Invalid API Key".into())
+            .unwrap());
+    }
+
     // Extract some useful information from the request
     let who = event
         .query_string_parameters_ref()
