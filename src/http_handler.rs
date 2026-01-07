@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::env;
 use supabase_rs::SupabaseClient;
 use thiserror::Error;
+use tracing::{error, info, instrument, warn};
 
 #[derive(Error, Debug)]
 pub enum ApiError {
@@ -33,6 +34,7 @@ pub enum ApiError {
 }
 
 /// SSM Parameter Storeから設定を一括で取得します。（ページネーションなし）
+#[instrument]
 pub async fn get_secrets() -> Result<HashMap<String, String>, ApiError> {
     let ssm_parameter_path = env::var("SSM_PARAMETER_PATH")
         .map_err(|_| ApiError::MissingEnvVar("SSM_PARAMETER_PATH".into()))?;
@@ -40,7 +42,7 @@ pub async fn get_secrets() -> Result<HashMap<String, String>, ApiError> {
     let config = aws_config::load_defaults(BehaviorVersion::v2025_08_07()).await;
     let ssm_client = SsmClient::new(&config);
 
-    println!("Fetching parameters from SSM path: {}", ssm_parameter_path);
+    info!(ssm_parameter_path = %ssm_parameter_path, "Fetching parameters from SSM");
 
     let mut secrets = HashMap::new();
 
@@ -52,14 +54,14 @@ pub async fn get_secrets() -> Result<HashMap<String, String>, ApiError> {
         .send()
         .await
         .map_err(|e| {
-            eprintln!("Failed to get parameters from SSM: {:?}", e);
+            error!(error = ?e, "Failed to get parameters from SSM");
             ApiError::SsmError
         })?;
 
     if let Some(params) = response.parameters {
         for param in params {
             if let (Some(name), Some(value)) = (param.name, param.value) {
-                println!("Fetched parameter: {}, value: {}", name, value);
+                info!(parameter_name = %name, "Fetched parameter from SSM");
                 // パスからキー名のみを抽出 (e.g., /expo-push-api/supabase-key -> supabase-key)
                 if let Some(key) = name.split('/').last() {
                     secrets.insert(key.to_string(), value);
@@ -68,7 +70,7 @@ pub async fn get_secrets() -> Result<HashMap<String, String>, ApiError> {
         }
     }
 
-    println!("Successfully fetched secrets from SSM.");
+    info!("Successfully fetched secrets from SSM");
     Ok(secrets)
 }
 
@@ -86,9 +88,10 @@ pub fn initialize_supabase_client(
         .map_err(|_| ApiError::SupabaseInitialization)
 }
 
+#[instrument(skip(client))]
 pub async fn fetch_expo_push_tokens(client: &SupabaseClient) -> Result<Vec<String>, ApiError> {
     let response = client.select("users").execute().await.map_err(|e| {
-        eprintln!("Error fetching expo push tokens: {:?}", e);
+        error!(error = ?e, "Error fetching expo push tokens");
         ApiError::SupabaseFetch
     })?;
 
@@ -96,7 +99,7 @@ pub async fn fetch_expo_push_tokens(client: &SupabaseClient) -> Result<Vec<Strin
         .iter()
         .filter_map(|row| row["expo_push_token"].as_str().map(|s| s.to_string()))
         .collect::<Vec<String>>();
-    println!("fetched expo push tokens from supabase {:?}", tokens);
+    info!(token_count = tokens.len(), "Fetched expo push tokens from Supabase");
     Ok(tokens)
 }
 
@@ -120,18 +123,20 @@ pub fn create_error_response(
         .body(json!({ "error": message }).to_string().into())?)
 }
 
+#[instrument(skip(event))]
 pub async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
     // 1. APIキーの検証
     let expected_key = env::var("API_KEY").expect("API_KEY not set");
     let expected_key_value =
         HeaderValue::from_str(&expected_key).map_err(|_| ApiError::InvalidApiKey)?;
     if event.headers().get("x-api-key") != Some(&expected_key_value) {
+        warn!("Invalid API key attempt");
         return create_error_response(StatusCode::FORBIDDEN, "Forbidden: Invalid API Key");
     }
 
-    println!(
-        "Expo push notification API ver: {}",
-        env!("CARGO_PKG_VERSION")
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "Expo push notification API request received"
     );
 
     // 2. SSMから設定情報を取得
@@ -181,7 +186,7 @@ pub async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
     }
 
     if expo_push_tokens.is_empty() {
-        println!("No push tokens found, skipping notification.");
+        info!("No push tokens found, skipping notification");
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
@@ -193,9 +198,9 @@ pub async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
     }
 
     // 4. プッシュ通知メッセージの構築
-    println!(
-        "Building push notification for tokens: {:?}",
-        expo_push_tokens
+    info!(
+        token_count = expo_push_tokens.len(),
+        "Building push notifications"
     );
     let messages = expo_push_tokens
         .into_iter()
@@ -209,7 +214,7 @@ pub async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
         .collect::<Result<Vec<_>, _>>()?;
 
     // 5. プッシュ通知の送信
-    println!("Sending push notifications...");
+    info!("Sending push notifications");
     let send_futures = messages
         .into_iter()
         .map(|msg| expo.send_push_notifications(msg))
@@ -220,13 +225,13 @@ pub async fn function_handler(event: Request) -> Result<Response<Body>, Error> {
     let has_error = results.iter().any(|r| r.is_err());
 
     if has_error {
-        eprintln!("Failed to send some push notifications: {:?}", results);
+        error!(results = ?results, "Failed to send some push notifications");
         create_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to send some push notifications",
         )
     } else {
-        println!("Push notifications sent successfully.");
+        info!("Push notifications sent successfully");
         Ok(Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "application/json")
